@@ -1,62 +1,58 @@
-import os
-os.environ['LD_LIBRARY_PATH'] = '/data/baokq/miniconda3/envs/alpaca_lora/lib/'
-import sys
-from typing import List
+# coding=utf-8
 
-import numpy as np 
+import os
+import sys
 import fire
 import torch
 import transformers
+from typing import List
 from datasets import load_dataset
 from transformers import EarlyStoppingCallback
+from transformers import LlamaForCausalLM, LlamaTokenizer
+from sklearn.metrics import roc_auc_score
 
-"""
-Unused imports:
-import torch.nn as nn
-import bitsandbytes as bnb
-"""
-
-from peft import (  # noqa: E402
+from peft import (
     LoraConfig,
     get_peft_model,
     get_peft_model_state_dict,
     prepare_model_for_int8_training,
     set_peft_model_state_dict,
 )
-from transformers import LlamaForCausalLM, LlamaTokenizer  # noqa: F402
-from sklearn.metrics import roc_auc_score
+
+os.environ['LD_LIBRARY_PATH'] = '/data/baokq/miniconda3/envs/alpaca_lora/lib/'
+
 
 def train(
-    # model/data params
-    base_model: str = "",  # the only required argument
-    train_data_path: str = "",
-    val_data_path: str = "",
-    output_dir: str = "./lora-alpaca",
-    sample: int = -1,
-    seed: int = 0,
-    # training hyperparams
-    batch_size: int = 128,
-    micro_batch_size: int = 4,
-    num_epochs: int = 3,
-    learning_rate: float = 3e-4,
-    cutoff_len: int = 256,
-    # lora hyperparams
-    lora_r: int = 8,
-    lora_alpha: int = 16,
-    lora_dropout: float = 0.05,
-    lora_target_modules: List[str] = [
-        "q_proj",
-        "v_proj",
-    ],
-    # llm hyperparams
-    train_on_inputs: bool = True,  # if False, masks out inputs in loss
-    group_by_length: bool = False,  # faster, but produces an odd training loss curve
-    # wandb params
-    wandb_project: str = "",
-    wandb_run_name: str = "",
-    wandb_watch: str = "",  # options: false | gradients | all
-    wandb_log_model: str = "",  # options: false | true
-    resume_from_checkpoint: str = None,  # either training checkpoint or final adapter
+        # model/data params
+        base_model: str = "",  # the only required argument
+        train_data_path: str = "",
+        val_data_path: str = "",
+        output_dir: str = "./lora-alpaca",
+        sample: int = -1,
+        seed: int = 0,
+        # training hyperparams
+        batch_size: int = 128,
+        micro_batch_size: int = 4,
+        num_epochs: int = 3,
+        learning_rate: float = 3e-4,
+        cutoff_len: int = 256,
+        # lora hyperparams
+        lora_r: int = 8,
+        lora_alpha: int = 16,
+        lora_dropout: float = 0.05,
+        lora_target_modules: List[str] = [
+            "q_proj",
+            "v_proj",
+        ],
+        # llm hyperparams
+        train_on_inputs: bool = True,  # if False, masks out inputs in loss
+        group_by_length: bool = False,  # faster, but produces an odd training loss curve
+        # wandb params
+        wandb_project: str = "",
+        wandb_run_name: str = "",
+        wandb_watch: str = "",  # options: false | gradients | all
+        wandb_log_model: str = "",  # options: false | true
+        resume_from_checkpoint: str = None,  # either training checkpoint or final adapter
 
 ):
     print(
@@ -99,7 +95,7 @@ def train(
 
     # Check if parameter passed or if set within environ
     use_wandb = len(wandb_project) > 0 or (
-        "WANDB_PROJECT" in os.environ and len(os.environ["WANDB_PROJECT"]) > 0
+            "WANDB_PROJECT" in os.environ and len(os.environ["WANDB_PROJECT"]) > 0
     )
     # Only overwrite environ if wandb param passed
     if len(wandb_project) > 0:
@@ -134,9 +130,9 @@ def train(
             return_tensors=None,
         )
         if (
-            result["input_ids"][-1] != tokenizer.eos_token_id
-            and len(result["input_ids"]) < cutoff_len
-            and add_eos_token
+                result["input_ids"][-1] != tokenizer.eos_token_id
+                and len(result["input_ids"]) < cutoff_len
+                and add_eos_token
         ):
             result["input_ids"].append(tokenizer.eos_token_id)
             result["attention_mask"].append(1)
@@ -152,12 +148,8 @@ def train(
             user_prompt = generate_prompt({**data_point, "output": ""})
             tokenized_user_prompt = tokenize(user_prompt, add_eos_token=False)
             user_prompt_len = len(tokenized_user_prompt["input_ids"])
-
-            tokenized_full_prompt["labels"] = [
-                -100
-            ] * user_prompt_len + tokenized_full_prompt["labels"][
-                user_prompt_len:
-            ]  # could be sped up, probably
+            tokenized_full_prompt["labels"] = [-100] * user_prompt_len + tokenized_full_prompt["labels"][
+                                                                         user_prompt_len:]  # could be sped up, probably
         return tokenized_full_prompt
 
     model = prepare_model_for_int8_training(model)
@@ -172,19 +164,16 @@ def train(
     )
     model = get_peft_model(model, config)
 
-    
-
     if train_data_path.endswith(".json"):  # todo: support jsonl
         train_data = load_dataset("json", data_files=train_data_path)
     else:
         train_data = load_dataset(train_data_path)
-    
+
     if val_data_path.endswith(".json"):  # todo: support jsonl
         val_data = load_dataset("json", data_files=val_data_path)
     else:
         val_data = load_dataset(val_data_path)
 
-    
     # train_data = train_data.shuffle(seed=42)[:sample] if sample > -1 else train_data
     # print(len(train_data))
     if resume_from_checkpoint:
@@ -209,7 +198,8 @@ def train(
 
     model.print_trainable_parameters()  # Be more transparent about the % of trainable params.
 
-    train_data["train"] = train_data["train"].shuffle(seed=seed).select(range(sample)) if sample > -1 else train_data["train"].shuffle(seed=seed)
+    train_data["train"] = train_data["train"].shuffle(seed=seed).select(range(sample)) if sample > -1 else train_data[
+        "train"].shuffle(seed=seed)
     train_data["train"] = train_data["train"].shuffle(seed=seed)
     train_data = (train_data["train"].map(generate_and_tokenize_prompt))
     val_data = (val_data["train"].map(generate_and_tokenize_prompt))
@@ -221,7 +211,7 @@ def train(
         pre, labels = eval_preds
         auc = roc_auc_score(pre[1], pre[0])
         return {'auc': auc}
-    
+
     def preprocess_logits_for_metrics(logits, labels):
         """
         Original Trainer may have a memory leak. 
@@ -229,19 +219,19 @@ def train(
         """
         labels_index = torch.argwhere(torch.bitwise_or(labels == 8241, labels == 3782))
         gold = torch.where(labels[labels_index[:, 0], labels_index[:, 1]] == 3782, 0, 1)
-        labels_index[: , 1] = labels_index[: , 1] - 1
+        labels_index[:, 1] = labels_index[:, 1] - 1
         logits = logits.softmax(dim=-1)
-        logits = torch.softmax(logits[labels_index[:, 0], labels_index[:, 1]][:,[3782, 8241]], dim = -1)
+        logits = torch.softmax(logits[labels_index[:, 0], labels_index[:, 1]][:, [3782, 8241]], dim=-1)
         return logits[:, 1][2::3], gold[2::3]
 
     os.environ["WANDB_DISABLED"] = "true"
-    
+
     if sample > -1:
-        if sample <= 128 :
+        if sample <= 128:
             eval_step = 10
         else:
             eval_step = sample / 128 * 5
-    
+
     trainer = transformers.Trainer(
         model=model,
         train_dataset=train_data,
@@ -275,7 +265,7 @@ def train(
         ),
         compute_metrics=compute_metrics,
         preprocess_logits_for_metrics=preprocess_logits_for_metrics,
-        callbacks = [EarlyStoppingCallback(early_stopping_patience=10)]
+        callbacks=[EarlyStoppingCallback(early_stopping_patience=10)]
     )
     model.config.use_cache = False
 

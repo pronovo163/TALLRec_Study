@@ -1,7 +1,6 @@
+# coding=utf-8
 import os
-
 import torch
-import transformers
 from peft import PeftModel
 from transformers import LlamaForCausalLM, LlamaTokenizer  # noqa: F402
 
@@ -29,9 +28,7 @@ lora_model = PeftModel.from_pretrained(
     torch_dtype=torch.float16,
 )
 
-lora_weight = lora_model.base_model.model.model.layers[
-    0
-].self_attn.q_proj.weight
+lora_weight = lora_model.base_model.model.model.layers[0].self_attn.q_proj.weight
 
 assert torch.allclose(first_weight_old, first_weight)
 

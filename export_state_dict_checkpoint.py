@@ -1,8 +1,6 @@
 import json
 import os
-
 import torch
-import transformers
 from peft import PeftModel
 from transformers import LlamaForCausalLM, LlamaTokenizer  # noqa: E402
 
@@ -50,7 +48,7 @@ dim = params["dim"]
 dims_per_head = dim // n_heads
 base = 10000.0
 inv_freq = 1.0 / (
-    base ** (torch.arange(0, dims_per_head, 2).float() / dims_per_head)
+        base ** (torch.arange(0, dims_per_head, 2).float() / dims_per_head)
 )
 
 
@@ -70,7 +68,7 @@ def unpermute(w):
     )
 
 
-def translate_state_dict_key(k):  # noqa: C901
+def translate_state_dict_key(k):
     k = k.replace("base_model.model.", "")
     if k == "model.embed_tokens.weight":
         return "tok_embeddings.weight"
