@@ -2,3 +2,5 @@
 .DS_Store
 decapoda-research-llama-7B-hf
 decapoda-research-llama-7B-hf.zip
+shell/.ipynb_checkpoints
+.ipynb_checkpoints
