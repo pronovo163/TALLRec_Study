@@ -1,7 +1,7 @@
 CUDA_ID=$1
 output_dir=$2
 model_path=$(ls -d $output_dir*)
-base_model=XXX
+base_model="baffo32/decapoda-research-llama-7B-hf"
 test_data="./data/movie/test.json"
 for path in $model_path; do
   echo $path
