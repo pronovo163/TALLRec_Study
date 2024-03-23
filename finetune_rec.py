@@ -10,7 +10,7 @@ from typing import List
 from datasets import load_dataset
 from transformers import LlamaForCausalLM, LlamaTokenizer
 from transformers import EarlyStoppingCallback
-from utils import preprocess_logits_for_metrics, compute_metrics, generate_and_tokenize_prompt
+from util.utils import preprocess_logits_for_metrics, compute_metrics, generate_and_tokenize_prompt
 
 # peft 库中含有包括LoRA在内的多种高效微调方法
 from peft import (
