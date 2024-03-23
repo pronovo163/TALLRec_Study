@@ -1,36 +1,42 @@
 # coding=utf-8
+import os
 import sys
 import fire
 import torch
 import json
-import os
 from tqdm import tqdm
 from peft import PeftModel
 from sklearn.metrics import roc_auc_score
 from transformers import GenerationConfig, LlamaForCausalLM, LlamaTokenizer
+from util.utils import generate_prompt_for_evaluate, get_batch
 
-torch.set_num_threads(1)
-os.environ['OPENBLAS_NUM_THREADS'] = '1'
-os.environ['OMP_NUM_THREADS'] = '1'
+torch.set_num_threads(1)  # 将PyTorch 所使用的线程数设置为 1
+os.environ['OPENBLAS_NUM_THREADS'] = '1'  # 控制 OpenBLAS（用于线性代数运算优化的BLAS库）的线程数设置为1
+os.environ['OMP_NUM_THREADS'] = '1'  # 控制 OpenMP（支持多平台共享内存并行编程的API）的线程数设置为1
+
 if torch.cuda.is_available():
     device = "cuda"
+elif torch.backends.mps.is_available():  # MPS 是 Apple 设备上用于 GPU 计算的 API
+    device = "mps"  # 在 Apple 的 GPU 上运行
 else:
     device = "cpu"
-
-try:
-    if torch.backends.mps.is_available():
-        device = "mps"
-except:
-    pass
 
 
 def main(
         load_8bit: bool = False,
-        base_model: str = "",
-        lora_weights: str = "tloen/alpaca-lora-7b",
-        test_data_path: str = "data/test.json",
+        base_model: str = "baffo32/decapoda-research-llama-7B-hf",
+        lora_weights: str = "./model_0_64",
+        test_data_path: str = "./data/movie/test.json",
         result_json_data: str = "temp.json",
 ):
+    print(
+        f"Training Alpaca-LoRA model with params:\n"
+        f"load_8bit: {load_8bit}\n"
+        f"base_model: {base_model}\n"
+        f"lora_weights: {lora_weights}\n"
+        f"test_data_path: {test_data_path}\n"
+        f"result_json_data: {result_json_data}\n")
+
     assert (
         base_model
     ), "Please specify a --base_model, e.g. --base_model='decapoda-research/llama-7b-hf'"
@@ -38,12 +44,12 @@ def main(
     model_type = lora_weights.split('/')[-1]
     model_name = '_'.join(model_type.split('_')[:2])
 
-    if model_type.find('book') > -1:
+    if 'book' in model_type:
         train_sce = 'book'
     else:
         train_sce = 'movie'
 
-    if test_data_path.find('book') > -1:
+    if 'book' in test_data_path:
         test_sce = 'book'
     else:
         test_sce = 'movie'
@@ -59,64 +65,41 @@ def main(
     else:
         data = dict()
 
-    if not data.__contains__(train_sce):
+    if train_sce not in data:
         data[train_sce] = {}
-    if not data[train_sce].__contains__(test_sce):
+    if test_sce not in data[train_sce]:
         data[train_sce][test_sce] = {}
-    if not data[train_sce][test_sce].__contains__(model_name):
+    if model_name not in data[train_sce][test_sce]:
         data[train_sce][test_sce][model_name] = {}
-    if not data[train_sce][test_sce][model_name].__contains__(seed):
+    if seed not in data[train_sce][test_sce][model_name]:
         data[train_sce][test_sce][model_name][seed] = {}
-    if data[train_sce][test_sce][model_name][seed].__contains__(sample):
+    if sample in data[train_sce][test_sce][model_name][seed]:
         exit(0)
-        # data[train_sce][test_sce][model_name][seed][sample] = 
+
+    model = LlamaForCausalLM.from_pretrained(
+        base_model,
+        device_map="auto" if device == "cuda" else {"": device},
+        load_in_8bit=load_8bit,
+        torch_dtype=torch.float16,
+    )
+    model = PeftModel.from_pretrained(
+        model,
+        lora_weights,
+        device_map={'': 0} if device == "cuda" else {"": device},
+        torch_dtype=torch.float16
+    )
 
     tokenizer = LlamaTokenizer.from_pretrained(base_model)
-    if device == "cuda":
-        model = LlamaForCausalLM.from_pretrained(
-            base_model,
-            load_in_8bit=load_8bit,
-            torch_dtype=torch.float16,
-            device_map="auto",
-        )
-        model = PeftModel.from_pretrained(
-            model,
-            lora_weights,
-            torch_dtype=torch.float16,
-            device_map={'': 0}
-        )
-    elif device == "mps":
-        model = LlamaForCausalLM.from_pretrained(
-            base_model,
-            device_map={"": device},
-            torch_dtype=torch.float16,
-        )
-        model = PeftModel.from_pretrained(
-            model,
-            lora_weights,
-            device_map={"": device},
-            torch_dtype=torch.float16,
-        )
-    else:
-        model = LlamaForCausalLM.from_pretrained(
-            base_model, device_map={"": device}, low_cpu_mem_usage=True
-        )
-        model = PeftModel.from_pretrained(
-            model,
-            lora_weights,
-            device_map={"": device},
-        )
-
     tokenizer.padding_side = "left"
-    # unwind broken decapoda-research config
-    model.config.pad_token_id = tokenizer.pad_token_id = 0  # unk
-    model.config.bos_token_id = 1
-    model.config.eos_token_id = 2
+    model.config.pad_token_id = tokenizer.pad_token_id = 0  # 模型和分词器使用token_id为0的进行填充
+    model.config.bos_token_id = 1  # 序列开始（Begin Of Sequence，BOS）标记用于指示序列的开始
+    model.config.eos_token_id = 2  # 序列结束（End Of Sequence，EOS）标记用于指示序列的结束
 
     if not load_8bit:
-        model.half()  # seems to fix bugs for some users.
+        model.half()  # 半精度运算，将模型的权重和激活值转换为半精度浮点数（16位浮点数，float16），减少模型的内存占用和加速计算
 
-    model.eval()
+    model.eval()  # 将模型设置为评估模式，注意某些层（如 dropout 和 batch normalization）的运行会与训练模式不同
+
     if torch.__version__ >= "2" and sys.platform != "win32":
         model = torch.compile(model)
 
@@ -130,7 +113,7 @@ def main(
             max_new_tokens=128,
             **kwargs,
     ):
-        prompt = [generate_prompt(instruction, input) for instruction, input in zip(instructions, inputs)]
+        prompt = [generate_prompt_for_evaluate(instruction, input) for instruction, input in zip(instructions, inputs)]
         inputs = tokenizer(prompt, return_tensors="pt", padding=True, truncation=True).to(device)
         generation_config = GenerationConfig(
             temperature=temperature,
@@ -148,18 +131,14 @@ def main(
                 max_new_tokens=max_new_tokens,
                 # batch_size=batch_size,
             )
-        s = generation_output.sequences
         scores = generation_output.scores[0].softmax(dim=-1)
         logits = torch.tensor(scores[:, [8241, 3782]], dtype=torch.float32).softmax(dim=-1)
-        input_ids = inputs["input_ids"].to(device)
-        L = input_ids.shape[1]
         s = generation_output.sequences
         output = tokenizer.batch_decode(s, skip_special_tokens=True)
         output = [_.split('Response:\n')[-1] for _ in output]
 
         return output, logits.tolist()
 
-    # testing code for readme
     outputs = []
     logits = []
     pred = []
@@ -170,12 +149,7 @@ def main(
         inputs = [_['input'] for _ in test_data]
         gold = [int(_['output'] == 'Yes.') for _ in test_data]
 
-        def batch(list, batch_size=32):
-            chunk_size = (len(list) - 1) // batch_size + 1
-            for i in range(chunk_size):
-                yield list[batch_size * i: batch_size * (i + 1)]
-
-        for i, batch in tqdm(enumerate(zip(batch(instructions), batch(inputs)))):
+        for i, batch in tqdm(enumerate(zip(get_batch(instructions), get_batch(inputs)))):
             instructions, inputs = batch
             output, logit = evaluate(instructions, inputs)
             outputs = outputs + output
@@ -184,32 +158,11 @@ def main(
             test_data[i]['predict'] = outputs[i]
             test_data[i]['logits'] = logits[i]
             pred.append(logits[i][0])
+
     data[train_sce][test_sce][model_name][seed][sample] = roc_auc_score(gold, pred)
     f = open(result_json_data, 'w')
     json.dump(data, f, indent=4)
     f.close()
-
-
-def generate_prompt(instruction, input=None):
-    if input:
-        return f"""Below is an instruction that describes a task, paired with an input that provides further context. Write a response that appropriately completes the request.  # noqa: E501
-
-### Instruction:
-{instruction}
-
-### Input:
-{input}
-
-### Response:
-"""
-    else:
-        return f"""Below is an instruction that describes a task. Write a response that appropriately completes the request.  # noqa: E501
-
-### Instruction:
-{instruction}
-
-### Response:
-"""
 
 
 if __name__ == "__main__":

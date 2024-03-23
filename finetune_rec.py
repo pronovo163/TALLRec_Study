@@ -24,9 +24,9 @@ from peft import (
 
 def train(
         # model/data params
-        base_model: str = "",  # the only required argument
-        train_data_path: str = "",
-        val_data_path: str = "",
+        base_model: str = "baffo32/decapoda-research-llama-7B-hf",  # the only required argument
+        train_data_path: str = "./data/movie/train.json",
+        val_data_path: str = "./data/movie/valid.json",
         output_dir: str = "./lora-alpaca",
         sample: int = -1,
         seed: int = 0,
@@ -50,7 +50,6 @@ def train(
         wandb_watch: str = "",  # options: false | gradients | all
         wandb_log_model: str = "",  # options: false | true
         resume_from_checkpoint: str = None,  # either training checkpoint or final adapter
-
 ):
     print(
         f"Training Alpaca-LoRA model with params:\n"
@@ -105,9 +104,11 @@ def train(
     if len(wandb_log_model) > 0:
         os.environ["WANDB_LOG_MODEL"] = wandb_log_model
 
-    # 从预训练模型加载Llama模型和分词器
+    # 加载预训练的Llama，因果语言建模（Causal Language Modeling）基于给定的文本上下文生成下一个最可能的词
+    os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'  # 加速 huggingface模型下载
+
     model = LlamaForCausalLM.from_pretrained(
-        base_model,
+        base_model,  # 预训练模型的名称或包含模型权重的本地路径。如果是本地路径，函数会从该路径加载模型权重；如果是模型名称，函数会自动从 Hugging Face 的模型仓库下载对应的权重
         load_in_8bit=True,
         torch_dtype=torch.float16,
         device_map=device_map,
@@ -168,8 +169,11 @@ def train(
     train_data["train"] = train_data["train"].shuffle(seed=seed).select(range(sample)) if sample > -1 else train_data[
         "train"].shuffle(seed=seed)
     train_data["train"] = train_data["train"].shuffle(seed=seed)
-    train_data = (train_data["train"].map(lambda x: generate_and_tokenize_prompt(x, tokenizer, cutoff_len)))  # 数据预处理和转换
-    val_data = (val_data["train"].map(lambda x: generate_and_tokenize_prompt(x, tokenizer, cutoff_len)))
+    # 数据预处理和转换
+    train_data = (
+        train_data["train"].map(lambda x: generate_and_tokenize_prompt(x, tokenizer, cutoff_len, train_on_inputs)))
+    val_data = (
+        val_data["train"].map(lambda x: generate_and_tokenize_prompt(x, tokenizer, cutoff_len, train_on_inputs)))
 
     if sample > -1:
         if sample <= 128:
@@ -182,20 +186,20 @@ def train(
         train_dataset=train_data,
         eval_dataset=val_data,
         args=transformers.TrainingArguments(
-            per_device_train_batch_size=micro_batch_size,
-            gradient_accumulation_steps=gradient_accumulation_steps,
-            warmup_steps=20,
+            per_device_train_batch_size=micro_batch_size,  # 每个设备（如GPU或CPU）上的批量大小
+            gradient_accumulation_steps=gradient_accumulation_steps,  # 梯度累积的步数
+            warmup_steps=20,  # 在学习率预热阶段，学习率将线性增加到其初始值的步数
             num_train_epochs=num_epochs,
             learning_rate=learning_rate,
             fp16=True,
-            logging_steps=8,
+            logging_steps=8,  # 每多少步记录一次日志
             optim="adamw_torch",
-            evaluation_strategy="steps",
-            save_strategy="steps",
-            eval_steps=eval_step,
-            save_steps=eval_step,
-            output_dir=output_dir,
-            save_total_limit=1,
+            evaluation_strategy="steps",  # 评估策略，'no'（不评估）、'steps'（每eval_steps步评估一次）、'epoch'（每个epoch结束时评估一次）
+            save_strategy="steps",  # 保存策略，同上
+            eval_steps=eval_step,  # 每多少步进行一次评估
+            save_steps=eval_step,  # 每多少步保存一次模型检查点
+            output_dir=output_dir,  # 训练过程中生成的文件和模型检查点将被保存在这个目录下
+            save_total_limit=1,  # 最大保存的检查点数量
             load_best_model_at_end=True,
             metric_for_best_model="eval_auc",
             ddp_find_unused_parameters=False if ddp else None,
@@ -206,29 +210,26 @@ def train(
             # eval_accumulation_steps=10,
         ),
         data_collator=transformers.DataCollatorForSeq2Seq(
-            tokenizer,
+            tokenizer,  # 与模型相对应的，对输入和目标文本进行编码的分词器实例
             pad_to_multiple_of=8,
-            return_tensors="pt",
+            return_tensors="pt",  # 返回的数据类型，可以是 'pt' (PyTorch tensors) 或 'tf' (TensorFlow tensors)
             padding=True
         ),
-        compute_metrics=compute_metrics,
-        preprocess_logits_for_metrics=preprocess_logits_for_metrics,
-        callbacks=[EarlyStoppingCallback(early_stopping_patience=10)]
+        compute_metrics=compute_metrics,  # 字典类型的评估指标
+        preprocess_logits_for_metrics=preprocess_logits_for_metrics,  # 在计算指标之前对模型输出的原始 logits 进行预处理
+        callbacks=[EarlyStoppingCallback(early_stopping_patience=10)]  # 连续 10 次评估都没有提升，训练将被提前终止
     )
 
     model.config.use_cache = False
 
-    old_state_dict = model.state_dict
-    model.state_dict = (
-        lambda self, *_, **__: get_peft_model_state_dict(
-            self, old_state_dict()
-        )
-    ).__get__(model, type(model))
-
+    old_state_dict = model.state_dict  # 模型在某个时间点的完整状态，包含模型所有权重和偏置的 Python 字典对象，通常用于模型的保存和加载
+    # 使用get_peft_model_state_dict函数处理状态字典
+    model.state_dict = (lambda self, *_, **__: get_peft_model_state_dict(self, old_state_dict())).__get__(model,
+                                                                                                          type(model))
     if torch.__version__ >= "2" and sys.platform != "win32":
         model = torch.compile(model)
 
-    trainer.train(resume_from_checkpoint=resume_from_checkpoint)
+    trainer.train(resume_from_checkpoint=resume_from_checkpoint)  # 是否从checkpoint恢复模型
 
     model.save_pretrained(output_dir)
 

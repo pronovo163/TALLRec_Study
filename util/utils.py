@@ -3,11 +3,15 @@ import torch
 from sklearn.metrics import roc_auc_score
 
 
-
 def compute_metrics(eval_preds):
     pre, labels = eval_preds
     auc = roc_auc_score(pre[1], pre[0])
     return {'auc': auc}
+
+def get_batch(list, batch_size=32):
+    chunk_size = (len(list) - 1) // batch_size + 1
+    for i in range(chunk_size):
+        yield list[batch_size * i: batch_size * (i + 1)]
 
 def tokenize(tokenizer, prompt, cutoff_len, add_eos_token=True):
     # there's probably a way to do this with the tokenizer settings
@@ -31,11 +35,12 @@ def tokenize(tokenizer, prompt, cutoff_len, add_eos_token=True):
 
     return result
 
-def generate_and_tokenize_prompt( data_point,tokenizer, cutoff_len):
-    full_prompt = generate_prompt(data_point)
+
+def generate_and_tokenize_prompt(data_point, tokenizer, cutoff_len,train_on_inputs):
+    full_prompt = generate_prompt_for_finetune(data_point)
     tokenized_full_prompt = tokenize(tokenizer, full_prompt, cutoff_len)
     if not train_on_inputs:
-        user_prompt = generate_prompt({**data_point, "output": ""})
+        user_prompt = generate_prompt_for_finetune({**data_point, "output": ""})
         tokenized_user_prompt = tokenize(tokenizer, user_prompt, cutoff_len, add_eos_token=False)
         user_prompt_len = len(tokenized_user_prompt["input_ids"])
         tokenized_full_prompt["labels"] = [-100] * user_prompt_len + tokenized_full_prompt["labels"][
@@ -56,7 +61,7 @@ def preprocess_logits_for_metrics(logits, labels):
     return logits[:, 1][2::3], gold[2::3]
 
 
-def generate_prompt(data_point):
+def generate_prompt_for_finetune(data_point):
     # sorry about the formatting disaster gotta move fast
     if data_point["input"]:
         return f"""Below is an instruction that describes a task, paired with an input that provides further context. Write a response that appropriately completes the request.  # noqa: E501
@@ -77,3 +82,24 @@ def generate_prompt(data_point):
 
 ### Response:
 {data_point["output"]}"""
+
+def generate_prompt_for_evaluate(instruction, input=None):
+    if input:
+        return f"""Below is an instruction that describes a task, paired with an input that provides further context. Write a response that appropriately completes the request.  # noqa: E501
+
+### Instruction:
+{instruction}
+
+### Input:
+{input}
+
+### Response:
+"""
+    else:
+        return f"""Below is an instruction that describes a task. Write a response that appropriately completes the request.  # noqa: E501
+
+### Instruction:
+{instruction}
+
+### Response:
+"""

@@ -4,7 +4,7 @@ output_dir="./model"
 base_model="baffo32/decapoda-research-llama-7B-hf"
 train_data="./data/movie/train.json"
 val_data="./data/movie/valid.json"
-instruction_model="alpaca-lora-7B"
+resume_from_checkpoint="./alpaca-lora-7B/checkpoint-1000"
 for lr in 1e-4; do
   for dropout in 0.05; do
     for sample in 64; do
@@ -25,7 +25,7 @@ for lr in 1e-4; do
         --lora_target_modules '[q_proj,v_proj]' \
         --train_on_inputs \
         --group_by_length \
-        --resume_from_checkpoint $instruction_model \
+        --resume_from_checkpoint $resume_from_checkpoint \
         --sample $sample \
         --seed $2
     done
