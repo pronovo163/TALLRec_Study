@@ -110,11 +110,11 @@ def train(
     # 加载预训练的Llama，因果语言建模（Causal Language Modeling）基于给定的文本上下文生成下一个最可能的词
 
     model = AutoModel.from_pretrained(
-        'decapoda-research-llama-7B-hf',  # 预训练模型的名称或包含模型权重的本地路径。如果是本地路径，函数会从该路径加载模型权重；如果是模型名称，函数会自动从 Hugging Face 的模型仓库下载对应的权重
-        # load_in_8bit=True,
+        'decapoda-research-llama-7B-hf',
+        cache_dir='../autodl-tmp/decapoda-research-llama-7B-hf',
+        load_in_8bit=True,
         torch_dtype=torch.float16,
-        device_map=device_map,
-        cache_dir='../autodl-tmp/decapoda-research-llama-7B-hf'
+        device_map=device_map
     )
 
     tokenizer = AutoTokenizer.from_pretrained('decapoda-research-llama-7B-hf',
@@ -233,6 +233,7 @@ def train(
     if torch.__version__ >= "2" and sys.platform != "win32":
         model = torch.compile(model)
 
+    resume_from_checkpoint = False
     trainer.train(resume_from_checkpoint=resume_from_checkpoint)  # 是否从checkpoint恢复模型
 
     model.save_pretrained(output_dir)
