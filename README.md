@@ -32,14 +32,18 @@ For "Environment setting sharing for CUDA 12.0", please see [here](https://githu
 评估：sudo bash ./shell/evaluate.sh 0 ./model_42_64
 
 可能的坑：
+
 autodl上无法下载hf的模型，使用国内镜像也不可以，可能是autodl的ip被加黑名单了
+
 解决方案：
+
 1、手动去官网下载或者使用自己电脑下载后找到缓存的模型，压缩之后上传到autodl；
 2、在autodl上解压缩模型，然后把模型移动到数据盘autodl-tmp（不移动的话，内存可能不足），文件重命名为decapoda-research-llama-7B-hf，其子文件名为models--decapoda-research-llama-7B-hf
 3、autodl上使用的时候LlamaForCausalLM.from_pretrained 和 LlamaTokenizer.from_pretrained 要传cache_dir的参数，cache_dir='../autodl-tmp/decapoda-research-llama-7B-hf'，pretrained_model_name_or_path='decapoda-research-llama-7B-hf'
 
 pytorch GPU不可用
+
 解决方案：
 vidia-smi 查看CUDA版本，然后安装与之匹配的pytorch版本
 
-作者源代码evaluate.py中batch_size: int = 32 ，运行的时候会导致torch.cuda.OutOfMemoryError: CUDA out of memory，需要把batch_size调小，我调成15还不行，调成10就可以了
+作者源代码evaluate.py中batch_size: int = 32 ，运行的时候会导致torch.cuda.OutOfMemoryError: CUDA out of memory，需要把batch_size调小，我调成15还不行，调成8就可以了

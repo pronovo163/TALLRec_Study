@@ -31,7 +31,7 @@ def main(
         lora_weights: str = "tloen/alpaca-lora-7b",
         test_data_path: str = "data/test.json",
         result_json_data: str = "temp.json",
-        batch_size: int = 10,
+        batch_size: int = 8,
 ):
     assert (
         base_model

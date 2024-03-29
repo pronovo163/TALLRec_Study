@@ -8,7 +8,6 @@ resume_from_checkpoint="./model/checkpoint-1000"
 for lr in 1e-4; do
   for dropout in 0.05; do
     for sample in 64; do
-      mkdir -p $output_dir
       echo "lr: $lr, dropout: $dropout , seed: $seed, sample: $sample"
       CUDA_VISIBLE_DEVICES=$1 python -u finetune_rec.py \
         --base_model $base_model \
