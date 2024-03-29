@@ -1,18 +1,13 @@
 # coding=utf-8
 import os
-# 设置环境变量LD_LIBRARY_PATH: 当系统默认的库路径不包含需要的库时,在程序运行时搜索共享库的目录
-# os.environ['LD_LIBRARY_PATH'] = '/data/baokq/miniconda3/envs/alpaca_lora/lib/'
-# os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'  # 加速 huggingface模型下载
 import sys
 import fire
 import torch
 import transformers
 from typing import List
 from datasets import load_dataset
-from transformers import LlamaForCausalLM, LlamaTokenizer
-from transformers import EarlyStoppingCallback
-from util.utils import preprocess_logits_for_metrics, compute_metrics, generate_and_tokenize_prompt
-from transformers import AutoModel, AutoTokenizer
+from transformers import LlamaForCausalLM, LlamaTokenizer, EarlyStoppingCallback
+from sklearn.metrics import roc_auc_score
 
 # peft 库中含有包括LoRA在内的多种高效微调方法
 from peft import (
@@ -24,11 +19,13 @@ from peft import (
 )
 
 
+# os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'  # 国内镜像，加速 huggingface模型下载
+
 def train(
         # model/data params
-        base_model: str = "baffo32/decapoda-research-llama-7B-hf",  # the only required argument
-        train_data_path: str = "./data/movie/train.json",
-        val_data_path: str = "./data/movie/valid.json",
+        base_model: str = "",  # the only required argument
+        train_data_path: str = "",
+        val_data_path: str = "",
         output_dir: str = "./lora-alpaca",
         sample: int = -1,
         seed: int = 0,
@@ -53,6 +50,7 @@ def train(
         wandb_log_model: str = "",  # options: false | true
         resume_from_checkpoint: str = None,  # either training checkpoint or final adapter
 ):
+    print("********************************** 打印函数入参 **********************************")
     print(
         f"Training Alpaca-LoRA model with params:\n"
         f"base_model: {base_model}\n"
@@ -82,24 +80,22 @@ def train(
         base_model
     ), "Please specify a --base_model, e.g. --base_model='decapoda-research/llama-7b-hf'"
 
-    # 计算梯度累积步数
-    gradient_accumulation_steps = batch_size // micro_batch_size
-    # print(f"gradient_accumulation_steps: {gradient_accumulation_steps}")
-
+    print("********************************** GPU相关配置 **********************************")
     # PyTorch中分布式数据并行（Distributed Data Parallel，DDP）的设置
     device_map = "auto"  # device_map是一个字典，用于指定每个进程应该使用的GPU设备;当设置为"auto"时，PyTorch会自动为每个进程分配一个可用的GPU
     world_size = int(os.environ.get("WORLD_SIZE", 1))  # WORLD_SIZE表示参与分布式训练的总进程数, 默认为1
     ddp = world_size != 1  # 是否启用分布式数据并行
+
+    # 计算梯度累积步数
+    gradient_accumulation_steps = batch_size // micro_batch_size
     # 若启用分布式训练，创建device_map字典指定当前进程应该使用的GPU设备，重新指定在更新模型权重之前应该累积多少个批次（batch）的梯度
-    
     if ddp:
         # LOCAL_RANK标识同一节点上的不同进程，空字符串""作为键表示默认设备，而整数值表示具体的GPU编号
-        device_map = {"": int(os.environ.get("LOCAL_RANK") or 0)}  # {"": 0}、{"": 1}
+        device_map = {"": int(os.environ.get("LOCAL_RANK") or 0)}
         # 使用多进程时，每个进程都会处理一部分数据，更新累积步数避免过多计算
         gradient_accumulation_steps = gradient_accumulation_steps // world_size
 
     # 设置实验追踪和模型管理Weights & Biases（WandB）环境变量
-    # use_wandb = len(wandb_project) > 0 or ("WANDB_PROJECT" in os.environ and len(os.environ["WANDB_PROJECT"]) > 0)
     if len(wandb_project) > 0:
         os.environ["WANDB_PROJECT"] = wandb_project
     if len(wandb_watch) > 0:
@@ -107,22 +103,22 @@ def train(
     if len(wandb_log_model) > 0:
         os.environ["WANDB_LOG_MODEL"] = wandb_log_model
 
-    # 加载预训练的Llama，因果语言建模（Causal Language Modeling）基于给定的文本上下文生成下一个最可能的词
-
-    model = AutoModel.from_pretrained(
+    print("********************************** 开始加载模型 **********************************")
+    model = LlamaForCausalLM.from_pretrained(
         'decapoda-research-llama-7B-hf',
-        cache_dir='../autodl-tmp/decapoda-research-llama-7B-hf',
         load_in_8bit=True,
         torch_dtype=torch.float16,
-        device_map=device_map
+        device_map=device_map,
+        cache_dir='../autodl-tmp/decapoda-research-llama-7B-hf'
     )
 
-    tokenizer = AutoTokenizer.from_pretrained('decapoda-research-llama-7B-hf',
-        cache_dir='../autodl-tmp/decapoda-research-llama-7B-hf')
+    tokenizer = LlamaTokenizer.from_pretrained('decapoda-research-llama-7B-hf',
+                                               cache_dir='../autodl-tmp/decapoda-research-llama-7B-hf')
+
     tokenizer.pad_token_id = (0)  # 使用ID为0的token进行padding
     tokenizer.padding_side = "left"  # 从左侧填充
 
-    # LoRA相关配置
+    print("********************************** LoRA相关配置 **********************************")
     model = prepare_model_for_int8_training(model)
     config = LoraConfig(
         r=lora_r,
@@ -150,21 +146,42 @@ def train(
             print(f"Checkpoint {checkpoint_name} not found")
 
     model.print_trainable_parameters()  # Be more transparent about the % of trainable params.
-    # 没有使用DDP且有多于一个的CUDA设备,开启模型并行,通常是单个模型太大而无法完全放入单个GPU内存中，模型的不同部分被分配到不同的GPU上
-    if not ddp and torch.cuda.device_count() > 1:
-        model.is_parallelizable = True
-        model.model_parallel = True
 
-    # 禁用Weights & Biases 可能是为了减少计算资源的开销，或不需要实验跟踪
-    os.environ["WANDB_DISABLED"] = "true"
+    def tokenize(prompt, add_eos_token=True):
+        # there's probably a way to do this with the tokenizer settings
+        # but again, gotta move fast
+        result = tokenizer(
+            prompt,
+            truncation=True,
+            max_length=cutoff_len,
+            padding=False,
+            return_tensors=None,
+        )
+        if (result["input_ids"][-1] != tokenizer.eos_token_id and len(
+                result["input_ids"]) < cutoff_len and add_eos_token):
+            result["input_ids"].append(tokenizer.eos_token_id)
+            result["attention_mask"].append(1)
+        result["labels"] = result["input_ids"].copy()
+        return result
 
-    # 加载训练和验证数据集
-    if train_data_path.endswith(".json"):
+    def generate_and_tokenize_prompt(data_point):
+        full_prompt = generate_prompt(data_point)
+        tokenized_full_prompt = tokenize(full_prompt)
+        if not train_on_inputs:
+            user_prompt = generate_prompt({**data_point, "output": ""})
+            tokenized_user_prompt = tokenize(user_prompt, add_eos_token=False)
+            user_prompt_len = len(tokenized_user_prompt["input_ids"])
+            tokenized_full_prompt["labels"] = [-100] * user_prompt_len + tokenized_full_prompt["labels"][
+                                                                         user_prompt_len:]  # could be sped up, probably
+        return tokenized_full_prompt
+
+    print("********************************** 加载训练和验证数据集 **********************************")
+    if train_data_path.endswith(".json"):  # todo: support jsonl
         train_data = load_dataset("json", data_files=train_data_path)
     else:
         train_data = load_dataset(train_data_path)
 
-    if val_data_path.endswith(".json"):
+    if val_data_path.endswith(".json"):  # todo: support jsonl
         val_data = load_dataset("json", data_files=val_data_path)
     else:
         val_data = load_dataset(val_data_path)
@@ -173,11 +190,35 @@ def train(
     train_data["train"] = train_data["train"].shuffle(seed=seed).select(range(sample)) if sample > -1 else train_data[
         "train"].shuffle(seed=seed)
     train_data["train"] = train_data["train"].shuffle(seed=seed)
-    # 数据预处理和转换
-    train_data = (
-        train_data["train"].map(lambda x: generate_and_tokenize_prompt(x, tokenizer, cutoff_len, train_on_inputs)))
-    val_data = (
-        val_data["train"].map(lambda x: generate_and_tokenize_prompt(x, tokenizer, cutoff_len, train_on_inputs)))
+
+    print("********************************** 数据预处理和转换 **********************************")
+    train_data = (train_data["train"].map(generate_and_tokenize_prompt))
+    val_data = (val_data["train"].map(generate_and_tokenize_prompt))
+
+    # 没有使用DDP且有多于一个的CUDA设备,开启模型并行,通常是单个模型太大而无法完全放入单个GPU内存中，模型的不同部分被分配到不同的GPU上
+    if not ddp and torch.cuda.device_count() > 1:
+        model.is_parallelizable = True
+        model.model_parallel = True
+
+    def compute_metrics(eval_preds):
+        pre, labels = eval_preds
+        auc = roc_auc_score(pre[1], pre[0])
+        return {'auc': auc}
+
+    def preprocess_logits_for_metrics(logits, labels):
+        """
+        Original Trainer may have a memory leak.
+        This is a workaround to avoid storing too many tensors that are not needed.
+        """
+        labels_index = torch.argwhere(torch.bitwise_or(labels == 8241, labels == 3782))
+        gold = torch.where(labels[labels_index[:, 0], labels_index[:, 1]] == 3782, 0, 1)
+        labels_index[:, 1] = labels_index[:, 1] - 1
+        logits = logits.softmax(dim=-1)
+        logits = torch.softmax(logits[labels_index[:, 0], labels_index[:, 1]][:, [3782, 8241]], dim=-1)
+        return logits[:, 1][2::3], gold[2::3]
+
+    # 禁用Weights & Biases 可能是为了减少计算资源的开销，或不需要实验跟踪
+    os.environ["WANDB_DISABLED"] = "true"
 
     if sample > -1:
         if sample <= 128:
@@ -209,9 +250,6 @@ def train(
             ddp_find_unused_parameters=False if ddp else None,
             group_by_length=group_by_length,
             report_to=None,
-            # report_to="wandb" if use_wandb else None,
-            # run_name=wandb_run_name if use_wandb else None,
-            # eval_accumulation_steps=10,
         ),
         data_collator=transformers.DataCollatorForSeq2Seq(
             tokenizer,  # 与模型相对应的，对输入和目标文本进行编码的分词器实例
@@ -226,19 +264,46 @@ def train(
 
     model.config.use_cache = False
 
-    old_state_dict = model.state_dict  # 模型在某个时间点的完整状态，包含模型所有权重和偏置的 Python 字典对象，通常用于模型的保存和加载
-    # 使用get_peft_model_state_dict函数处理状态字典
+    old_state_dict = model.state_dict
     model.state_dict = (lambda self, *_, **__: get_peft_model_state_dict(self, old_state_dict())).__get__(model,
                                                                                                           type(model))
+
     if torch.__version__ >= "2" and sys.platform != "win32":
         model = torch.compile(model)
 
+    print("********************************** 模型开始训练 **********************************")
     resume_from_checkpoint = False
-    trainer.train(resume_from_checkpoint=resume_from_checkpoint)  # 是否从checkpoint恢复模型
+    trainer.train(resume_from_checkpoint=resume_from_checkpoint)
 
+    print("********************************** 模型导出 **********************************")
     model.save_pretrained(output_dir)
 
-    print("\n If there's a warning about missing keys above, please disregard :)")
+    print(
+        "\n If there's a warning about missing keys above, please disregard :)"
+    )
+
+
+def generate_prompt(data_point):
+    # sorry about the formatting disaster gotta move fast
+    if data_point["input"]:
+        return f"""Below is an instruction that describes a task, paired with an input that provides further context. Write a response that appropriately completes the request.  # noqa: E501
+
+### Instruction:
+{data_point["instruction"]}
+
+### Input:
+{data_point["input"]}
+
+### Response:
+{data_point["output"]}"""
+    else:
+        return f"""Below is an instruction that describes a task. Write a response that appropriately completes the request.  # noqa: E501
+
+### Instruction:
+{data_point["instruction"]}
+
+### Response:
+{data_point["output"]}"""
 
 
 if __name__ == "__main__":

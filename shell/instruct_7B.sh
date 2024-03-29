@@ -4,7 +4,7 @@ output_dir="./model"
 base_model="../autodl-tmp/decapoda-research-llama-7B-hf"
 train_data="./data/movie/train.json"
 val_data="./data/movie/valid.json"
-resume_from_checkpoint="./alpaca-lora-7B/checkpoint-1000"
+resume_from_checkpoint="./model/checkpoint-1000"
 for lr in 1e-4; do
   for dropout in 0.05; do
     for sample in 64; do
@@ -17,7 +17,7 @@ for lr in 1e-4; do
         --output_dir ${output_dir}_${seed}_${sample} \
         --batch_size 86 \
         --micro_batch_size 32 \
-        --num_epochs 200 \
+        --num_epochs 10 \
         --learning_rate $lr \
         --cutoff_len 512 \
         --lora_r 8 \
